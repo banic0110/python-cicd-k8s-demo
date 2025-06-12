@@ -1,0 +1,126 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  name: Default
+
+variables:
+  dockerImage: ic0110/infosyp-python-cicd-k8s-demo
+  dockerTag: latest
+  dockerfilePath: docker/app/Dockerfile
+  buildContext: .
+  k8sYamlPath: environment/
+  sonarProjectKey: python-cicd-app
+  sonarProjectName: PythonCICDApp
+  sonarHostUrl: 'http://localhost:9000'
+  sonarToken: '$(SONARQUBE_TOKEN)'
+
+stages:
+
+- stage: SonarQube
+  displayName: "SonarQube Analysis"
+  jobs:
+    - job: Analysis
+      displayName: "Run SonarQube analysis"
+      steps:
+        - checkout: self
+
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: '3.x'
+
+        - script: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          displayName: "Instalar dependencias"
+
+        - task: SonarQubePrepare@5
+          displayName: "Prepare SonarQube"
+          inputs:
+            SonarQube: 'Local Agent SonarQube'
+            scannerMode: 'CLI'
+            configMode: 'manual'
+            cliProjectKey: $(sonarProjectKey)
+            cliProjectName: $(sonarProjectName)
+            cliSources: '.'
+            extraProperties: |
+              sonar.python.version=3.10
+              sonar.projectBaseDir=.
+              sonar.sourceEncoding=UTF-8
+              sonar.branch.name=
+          env:
+            SONARQUBE_SCANNER_PARAMS: '{"sonar.branch.name": ""}'
+
+        - task: SonarQubeAnalyze@5
+          displayName: "Run SonarQube Analysis"
+          env:
+            SONARQUBE_SCANNER_PARAMS: '{"sonar.branch.name": ""}'
+
+        - task: SonarQubePublish@5
+          displayName: "Publish SonarQube Results"
+          inputs:
+            pollingTimeoutSec: '300'
+
+- stage: Docker
+  dependsOn: SonarQube
+  condition: succeeded()
+  displayName: "Docker Build & Push"
+  jobs:
+    - job: BuildPush
+      steps:
+        - task: Docker@2
+          displayName: "Build Docker Image"
+          inputs:
+            command: build
+            Dockerfile: $(dockerfilePath)
+            tags: $(dockerTag)
+            repository: $(dockerImage)
+            buildContext: $(buildContext)
+        
+        - task: Docker@2
+          displayName: "Push to DockerHub"
+          inputs:
+            command: push
+            tags: $(dockerTag)
+            repository: $(dockerImage)
+
+- stage: Scripts
+  displayName: "Run Script Tasks"
+  jobs:
+    - job: HolaMundo
+      displayName: "Imprimir Hola Mundo en paralelo"
+      strategy:
+        parallel: 10
+      steps:
+        - script: echo "Hola Mundo"
+          displayName: "Hola Mundo"
+
+    - job: CrearArchivos
+      displayName: "Crear archivos con fecha"
+      steps:
+        - powershell: |
+            $date = Get-Date -Format "yyyyMMdd_HHmmss"
+            for ($i=1; $i -le 10; $i++) {
+              $filename = "archivo_$date`_$i.txt"
+              New-Item -ItemType File -Path $filename
+              Write-Output "Archivo creado: $filename"
+            }
+            Get-ChildItem archivo_*.txt | ForEach-Object { Write-Output $_.Name }
+          displayName: "Crear archivos y mostrarlos"
+
+- stage: DeployK8s
+  dependsOn: Docker
+  displayName: "Deploy to Minikube"
+  jobs:
+    - job: DeployApp
+      displayName: "Deploy Application"
+      steps:
+        - script: |
+            echo "Cleaning up old resources..."
+            kubectl delete -f $(k8sYamlPath) --ignore-not-found=true
+            echo "Deploying manifests..."
+            kubectl apply -f $(k8sYamlPath)
+            kubectl get all
+          displayName: "Apply Kubernetes manifests"
